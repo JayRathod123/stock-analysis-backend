@@ -19,9 +19,6 @@ def is_base_candle(row: pd.Series, atr_value: float) -> bool:
     return body_pct < 0.5 or hl_range < (0.8 * atr_value)
 
 def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, Any]]:
-    """
-    Scans the candle series and returns a list of detected Supply and Demand zones.
-    """
     zones = []
     if len(df) < 10:
         return zones
@@ -31,7 +28,6 @@ def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, 
     highs = df["high"]
     lows = df["low"]
     
-    # Calculate ATR 14
     from app.analysis.indicators.calculations import calculate_atr
     atr = calculate_atr(highs, lows, closes, 14)
     
@@ -40,96 +36,104 @@ def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, 
         if atr_val == 0:
             atr_val = 1.0
             
-        # Check potential base candle sequences starting at index i
         for base_len in range(1, max_base_candles + 1):
             if i + base_len >= len(df) - 1:
                 break
                 
             base_rows = [df.iloc[i + k] for k in range(base_len)]
             
-            # Verify all base candles fit the base criteria
-            all_base = True
-            for r in base_rows:
-                if not is_base_candle(r, atr_val):
-                    all_base = False
+            all_bases = True
+            for br in base_rows:
+                if not is_base_candle(br, atr_val):
+                    all_bases = False
                     break
                     
-            if not all_base:
+            if not all_bases:
                 continue
                 
-            # Check candles before and after the base zone
-            prev_candle = df.iloc[i - 1]
-            next_candle = df.iloc[i + base_len]
+            legin_idx = i - 1
+            legout_idx = i + base_len
             
-            # Calculations for directional movements
-            prev_body = prev_candle["close"] - prev_candle["open"]
-            next_body = next_candle["close"] - next_candle["open"]
+            legin = df.iloc[legin_idx]
+            legout = df.iloc[legout_idx]
             
-            # Demand Pattern: DBR (Drop-Base-Rally) or RBR (Rally-Base-Rally)
-            # Departure must be strong (next body must be positive and substantial)
-            if next_body > 1.5 * atr_val:
-                is_demand = False
-                pattern = ""
+            if is_base_candle(legin, atr_val) or is_base_candle(legout, atr_val):
+                continue
                 
-                if prev_body < -1.0 * atr_val:
-                    is_demand = True
-                    pattern = "DBR"
-                elif prev_body > 1.0 * atr_val:
-                    is_demand = True
-                    pattern = "RBR"
-                    
-                if is_demand:
-                    # Boundary calculations
-                    base_highs = [r["high"] for r in base_rows]
-                    base_lows = [r["low"] for r in base_rows]
-                    base_bodies_top = [max(r["open"], r["close"]) for r in base_rows]
-                    
-                    proximal = max(base_bodies_top) # Conservative: top of bodies
-                    distal = min(base_lows) # Bottom of wicks
-                    
-                    zones.append({
-                        "type": "DEMAND",
-                        "pattern": pattern,
-                        "price_min": distal,
-                        "price_max": proximal,
-                        "base_candles": base_len,
-                        "base_start_idx": i,
-                        "base_end_idx": i + base_len - 1,
-                        "departure_strength": "STRONG" if next_body > 2.5 * atr_val else "WEAK",
-                        "atr_val": atr_val
-                    })
-                    
-            # Supply Pattern: RBD (Rally-Base-Drop) or DBD (Drop-Base-Drop)
-            # Departure must be strong negative
-            elif next_body < -1.5 * atr_val:
-                is_supply = False
-                pattern = ""
+            legin_range = legin["high"] - legin["low"]
+            legout_range = legout["high"] - legout["low"]
+            
+            legin_dir = "GREEN" if legin["close"] > legin["open"] else "RED"
+            legout_dir = "GREEN" if legout["close"] > legout["open"] else "RED"
+            
+            # GTF Closing Concepts (Page 24)
+            # Demand: Legout MUST close above legin. Supply: Legout MUST close below legin.
+            
+            is_demand = legout_dir == "GREEN"
+            is_supply = legout_dir == "RED"
+            
+            if is_demand and legout["close"] <= legin["close"]:
+                continue # Fails closing concept
+            if is_supply and legout["close"] >= legin["close"]:
+                continue # Fails closing concept
                 
-                if prev_body > 1.0 * atr_val:
-                    is_supply = True
-                    pattern = "RBD"
-                elif prev_body < -1.0 * atr_val:
-                    is_supply = True
-                    pattern = "DBD"
-                    
-                if is_supply:
-                    base_highs = [r["high"] for r in base_rows]
-                    base_lows = [r["low"] for r in base_rows]
-                    base_bodies_bottom = [min(r["open"], r["close"]) for r in base_rows]
-                    
-                    proximal = min(base_bodies_bottom) # Bottom of bodies
-                    distal = max(base_highs) # Top of wicks
-                    
-                    zones.append({
-                        "type": "SUPPLY",
-                        "pattern": pattern,
-                        "price_min": proximal,
-                        "price_max": distal,
-                        "base_candles": base_len,
-                        "base_start_idx": i,
-                        "base_end_idx": i + base_len - 1,
-                        "departure_strength": "STRONG" if abs(next_body) > 2.5 * atr_val else "WEAK",
-                        "atr_val": atr_val
-                    })
-                    
+            # Zone Marking (Page 11-12)
+            # Demand Proximal: Highest body of all base. Distal: Lowest wick of all base.
+            # Supply Proximal: Lowest body of all base. Distal: Highest wick of all base.
+            base_high_bodies = [max(r["open"], r["close"]) for r in base_rows]
+            base_low_bodies = [min(r["open"], r["close"]) for r in base_rows]
+            base_high_wicks = [r["high"] for r in base_rows]
+            base_low_wicks = [r["low"] for r in base_rows]
+            
+            if is_demand:
+                price_max = max(base_high_bodies) # Proximal
+                price_min = min(base_low_wicks) # Distal
+                pattern = "RBR" if legin_dir == "GREEN" else "DBR"
+            else:
+                price_min = min(base_low_bodies) # Proximal
+                price_max = max(base_high_wicks) # Distal
+                pattern = "DBD" if legin_dir == "RED" else "RBD"
+                
+            zones.append({
+                "type": "DEMAND" if is_demand else "SUPPLY",
+                "pattern": pattern,
+                "price_min": price_min,
+                "price_max": price_max,
+                "base_candles": base_len,
+                "departure_strength": "STRONG",
+                "base_end_idx": legout_idx - 1,
+            })
+            
     return zones
+
+def deduplicate_zones(zones: List[Dict[str, Any]], threshold_pct: float = 0.02) -> List[Dict[str, Any]]:
+    if not zones:
+        return []
+    demands = sorted([z for z in zones if z["type"] == "DEMAND"], key=lambda x: x["price_max"])
+    supplies = sorted([z for z in zones if z["type"] == "SUPPLY"], key=lambda x: x["price_min"])
+    
+    def merge_group(group: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not group:
+            return []
+        merged = []
+        current = group[0]
+        for next_zone in group[1:]:
+            price_ref = current["price_max"] if current["type"] == "DEMAND" else current["price_min"]
+            price_next = next_zone["price_max"] if next_zone["type"] == "DEMAND" else next_zone["price_min"]
+            diff_pct = abs(price_ref - price_next) / price_ref if price_ref > 0 else 0
+            if diff_pct <= threshold_pct:
+                if current["type"] == "DEMAND":
+                    current["price_min"] = min(current["price_min"], next_zone["price_min"])
+                    current["price_max"] = max(current["price_max"], next_zone["price_max"])
+                else:
+                    current["price_min"] = min(current["price_min"], next_zone["price_min"])
+                    current["price_max"] = max(current["price_max"], next_zone["price_max"])
+                if next_zone['pattern'] not in current['pattern']:
+                    current["pattern"] = f"{current['pattern']} / {next_zone['pattern']}"
+            else:
+                merged.append(current)
+                current = next_zone
+        merged.append(current)
+        return merged
+
+    return merge_group(demands) + merge_group(supplies)

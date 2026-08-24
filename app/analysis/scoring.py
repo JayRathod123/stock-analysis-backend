@@ -6,10 +6,6 @@ def evaluate_freshness_and_retests(
     zone: Dict[str, Any], 
     candles: pd.DataFrame
 ) -> Tuple[str, int, List[Dict[str, Any]]]:
-    """
-    Evaluates historical retests for a zone.
-    Returns (status, retest_count, test_history).
-    """
     status = "FRESH"
     retest_count = 0
     test_history = []
@@ -19,7 +15,6 @@ def evaluate_freshness_and_retests(
     p_max = zone["price_max"]
     is_demand = zone["type"] == "DEMAND"
     
-    # distal/proximal boundaries
     if is_demand:
         proximal = p_max
         distal = p_min
@@ -31,36 +26,19 @@ def evaluate_freshness_and_retests(
         candle = candles.iloc[idx]
         c_low = candle["low"]
         c_high = candle["high"]
-        timestamp = candle["timestamp"]
         
-        # Check invalidation first
         if is_demand and c_low <= distal:
             status = "INVALIDATED"
-            test_history.append({
-                "timestamp": timestamp,
-                "type": "INVALIDATION",
-                "price": c_low
-            })
             break
         elif not is_demand and c_high >= distal:
             status = "INVALIDATED"
-            test_history.append({
-                "timestamp": timestamp,
-                "type": "INVALIDATION",
-                "price": c_high
-            })
             break
             
-        # Check touch
         touched = False
-        penetration = 0.0
-        
         if is_demand and c_low <= proximal:
             touched = True
-            penetration = (proximal - c_low) / (proximal - distal)
         elif not is_demand and c_high >= proximal:
             touched = True
-            penetration = (c_high - proximal) / (distal - proximal)
             
         if touched:
             retest_count += 1
@@ -71,13 +49,6 @@ def evaluate_freshness_and_retests(
             else:
                 status = "CONSUMED"
                 
-            test_history.append({
-                "timestamp": timestamp,
-                "type": f"RETEST_{retest_count}",
-                "price": c_low if is_demand else c_high,
-                "penetration": min(1.0, max(0.0, penetration))
-            })
-            
     return status, retest_count, test_history
 
 def score_zone(
@@ -85,104 +56,90 @@ def score_zone(
     df: pd.DataFrame, 
     status: str, 
     retest_count: int,
-    market_bias: str = "NEUTRAL"
+    itf_trend: str = "NEUTRAL",
+    htf_curve: str = "EQUILIBRIUM",
+    ema_context: str = "N/A"
 ) -> Dict[str, Any]:
-    """
-    Scores a zone, builds positive/negative lists, and checks garbage filters.
-    """
     positive_reasons = []
     negative_reasons = []
     rejection_reasons = []
+    points = 0.0
     
-    # 1. Base Quality (15 pts)
-    # Lower base candles are better
-    base_count = zone["base_candles"]
-    if base_count <= 2:
-        base_score = 100
-        positive_reasons.append("Tight consolidation base (1-2 candles)")
-    elif base_count <= 4:
-        base_score = 80
-        positive_reasons.append("Standard consolidation base (3-4 candles)")
-    else:
-        base_score = 50
-        negative_reasons.append(f"Wide consolidation base ({base_count} candles)")
-        if base_count > 6:
-            rejection_reasons.append(f"Excessive base candles ({base_count} count)")
-            
-    # 2. Departure Strength (15 pts)
-    dep_strength = zone["departure_strength"]
-    if dep_strength == "STRONG":
-        dep_score = 100
-        positive_reasons.append("High impulse departure displacement")
-    else:
-        dep_score = 60
-        negative_reasons.append("Weak departure velocity")
-        
-    # 3. Freshness (15 pts)
+    is_demand = zone["type"] == "DEMAND"
+
+    # 1. Freshness (Max 3)
     if status == "FRESH":
-        fresh_score = 100
-        positive_reasons.append("Untested fresh zone")
+        points += 3
+        positive_reasons.append("Fresh (Untested) (+3)")
     elif status == "FIRST_RETEST":
-        fresh_score = 75
-        positive_reasons.append("Zone tested once (retained strength)")
-    elif status == "SECOND_RETEST":
-        fresh_score = 40
-        negative_reasons.append("Zone tested twice (reduced probability)")
+        points += 1.5
+        positive_reasons.append("Tested Once (+1.5)")
     else:
-        fresh_score = 0
-        rejection_reasons.append(f"Zone consumed (status: {status})")
+        negative_reasons.append("Tested Twice or Consumed (0)")
         
-    # 4. Participation/Liquidity Proxy (10 pts)
-    # Estimated based on relative volume and displacement
-    vol_series = df["volume"]
-    departure_candle = df.iloc[zone["base_end_idx"] + 1]
-    
-    # Calculate simple relative volume
-    recent_vols = vol_series.iloc[max(0, zone["base_end_idx"]-20):zone["base_end_idx"]+1]
-    avg_vol = recent_vols.mean() if len(recent_vols) > 0 else 1.0
-    rel_vol = departure_candle["volume"] / avg_vol if avg_vol > 0 else 1.0
-    
-    participation_proxy = min(100, int(rel_vol * 35))
-    if participation_proxy > 80:
-        positive_reasons.append("Strong institutional volume proxy support")
+    # 2. Strength / Departure (Max 2)
+    # Check departure candles for gaps
+    departure_idx = zone["base_end_idx"] + 1
+    if departure_idx < len(df):
+        dep_candle = df.iloc[departure_idx]
+        prev_candle = df.iloc[zone["base_end_idx"]]
+        
+        has_gap = False
+        if is_demand and dep_candle["open"] > prev_candle["high"]:
+            has_gap = True
+        elif not is_demand and dep_candle["open"] < prev_candle["low"]:
+            has_gap = True
+            
+        # For simplicity, if departure_strength is STRONG we assume it's exciting.
+        # We also look at the candle after departure to see if it's 2 exciting.
+        second_exciting = False
+        if departure_idx + 1 < len(df):
+            c2 = df.iloc[departure_idx + 1]
+            from app.analysis.zones import is_base_candle
+            # If not a base candle, it's exciting
+            atr_val = (c2["high"] - c2["low"]) # rough approx
+            if not is_base_candle(c2, atr_val):
+                second_exciting = True
+
+        if second_exciting:
+            points += 2
+            positive_reasons.append("2 Exciting Candles Departure (+2)")
+        elif has_gap:
+            points += 2
+            positive_reasons.append("1 Exciting Candle with GAP (+2)")
+        else:
+            points += 1
+            positive_reasons.append("1 Exciting Candle no GAP (+1)")
+            
+    # 3. Time at Base (Max 2)
+    base_count = zone["base_candles"]
+    if 1 <= base_count <= 3:
+        points += 2
+        positive_reasons.append(f"1-3 Base Candles ({base_count}) (+2)")
+    elif 4 <= base_count <= 5:
+        points += 1
+        positive_reasons.append(f"4-5 Base Candles ({base_count}) (+1)")
     else:
-        negative_reasons.append("Low volume participation proxy marker")
-        
-    # 5. Trend Alignment & Bias (18 pts)
-    trend_score = 50
-    zone_type = zone["type"]
-    if (zone_type == "DEMAND" and market_bias == "BULLISH") or (zone_type == "SUPPLY" and market_bias == "BEARISH"):
-        trend_score = 100
-        positive_reasons.append(f"Zone aligned with {market_bias} market bias")
-    elif market_bias != "NEUTRAL":
-        trend_score = 30
-        negative_reasons.append(f"Zone counter-trend to {market_bias} bias")
-        
-    # Standard values for remaining categories
-    auth_score = int((base_score + dep_score + (100 if participation_proxy > 60 else 50)) / 3)
-    
-    # Final Weighted score calculation
-    final_score = int(
-        (base_score * 0.15) +
-        (dep_score * 0.15) +
-        (fresh_score * 0.15) +
-        (auth_score * 0.15) +
-        (participation_proxy * 0.10) +
-        (trend_score * 0.18) +
-        (75 * 0.12) # Static default structure / MA weights
-    )
-    
-    # Hard invalidate rejections
-    if status == "INVALIDATED":
-        rejection_reasons.append("Zone price boundaries breached (invalidated)")
-        
+        negative_reasons.append(f">5 Base Candles ({base_count}) (0)")
+
+    # MTF Curve & Trend (Hard Filters)
+    if is_demand:
+        if htf_curve == "HIGH":
+            rejection_reasons.append("REJECTED: High on HTF Curve (Do not buy).")
+        if itf_trend == "DOWNTREND":
+            rejection_reasons.append("REJECTED: Trading against Downtrend (Do not buy).")
+    else:
+        if htf_curve == "LOW":
+            rejection_reasons.append("REJECTED: Low on HTF Curve (Do not sell).")
+        if itf_trend == "UPTREND":
+            rejection_reasons.append("REJECTED: Trading against Uptrend (Do not sell).")
+
     return {
-        "final_score": final_score,
-        "authentication_score": auth_score,
-        "participation_proxy_score": participation_proxy,
+        "final_score": points,
         "positive_reasons": positive_reasons,
         "negative_reasons": negative_reasons,
         "rejection_reasons": rejection_reasons,
-        "is_rejected": len(rejection_reasons) > 0,
-        "rating_class": "A+" if final_score >= 90 else "Strong" if final_score >= 80 else "Watch" if final_score >= 70 else "Reject"
+        "participation_proxy_score": points * 14.28, # Convert 7 to 100 scale
+        "authentication_score": points * 14.28,
+        "is_rejected": len(rejection_reasons) > 0
     }

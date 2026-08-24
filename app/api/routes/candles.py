@@ -94,22 +94,14 @@ def get_candles(
     timeframe: str = Query("15m", description="Candle interval: 1m/5m/15m/30m/1H/4H/Daily/Weekly"),
     exchange: str = Query("NSE", description="Exchange: NSE or BSE"),
 ):
-    """
-    Fetch real OHLCV candle data for an Indian stock from Yahoo Finance.
-    Automatically falls back to synthetic demo data if the live fetch fails.
-    """
     sym = symbol.upper().strip()
     tf = timeframe.strip()
 
-    # 1. Attempt live Yahoo Finance fetch
     try:
         candles = _yf_fetch(sym, tf)
         if candles:
-            logger.info(f"Yahoo Finance: {len(candles)} candles returned for {sym}/{tf}")
             return candles
-        logger.warning(f"Yahoo Finance returned empty data for {sym}/{tf}, using fallback")
+        else:
+            raise HTTPException(status_code=404, detail=f"No data available for {sym}")
     except Exception as exc:
-        logger.warning(f"Yahoo Finance fetch failed for {sym}/{tf}: {exc} — using synthetic fallback")
-
-    # 2. Synthetic fallback
-    return _synthetic_fallback(sym, tf)
+        raise HTTPException(status_code=404, detail=f"Yahoo Finance fetch failed for {sym}: {exc}")

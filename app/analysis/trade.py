@@ -10,28 +10,23 @@ def generate_trade_setup(
     is_demand = zone["type"] == "DEMAND"
     p_min = zone["price_min"]
     p_max = zone["price_max"]
-    
-    # 0.5 * ATR buffer for SL placement
-    sl_buffer = 0.5 * atr_val
-    if sl_buffer <= 0:
-        sl_buffer = 0.01 * p_min
         
     if is_demand:
-        entry = p_max # Buy at proximal boundary
-        sl = p_min - sl_buffer # SL below distal boundary
+        entry = p_max # Proximal line
+        sl = p_min # Distal line
         risk = entry - sl
-        
-        # Target 1 (1:2 R:R), Target 2 (1:4 R:R)
-        t1 = entry + 2.0 * risk
-        t2 = entry + 4.0 * risk
+            
+        # Target 1 (1:3 R:R), Target 2 (1:5 R:R)
+        t1 = entry + 3.0 * risk
+        t2 = entry + 5.0 * risk
         reward = t1 - entry
     else:
-        entry = p_min # Short at proximal boundary
-        sl = p_max + sl_buffer # SL above distal boundary
+        entry = p_min # Proximal line
+        sl = p_max # Distal line
         risk = sl - entry
-        
-        t1 = entry - 2.0 * risk
-        t2 = entry - 4.0 * risk
+            
+        t1 = entry - 3.0 * risk
+        t2 = entry - 5.0 * risk
         reward = entry - t1
         
     rr = reward / risk if risk > 0 else 0

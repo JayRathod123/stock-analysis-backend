@@ -93,3 +93,28 @@ def analyze_market_structure(df: pd.DataFrame, window: int = 2) -> Dict[str, Any
         "bos_count": bos_count,
         "choch_detected": choch_detected
     }
+
+def evaluate_curve(df_htf: pd.DataFrame, current_price: float) -> str:
+    from app.analysis.zones import detect_zones
+    zones = detect_zones(df_htf)
+    
+    htf_supplies = [z for z in zones if z["type"] == "SUPPLY" and z["price_min"] > current_price]
+    htf_demands = [z for z in zones if z["type"] == "DEMAND" and z["price_max"] < current_price]
+    
+    closest_supply = min(htf_supplies, key=lambda x: x["price_min"])["price_min"] if htf_supplies else None
+    closest_demand = max(htf_demands, key=lambda x: x["price_max"])["price_max"] if htf_demands else None
+    
+    if not closest_supply or not closest_demand:
+        return "EQUILIBRIUM" # Cannot determine full curve
+        
+    curve_range = closest_supply - closest_demand
+    price_position = current_price - closest_demand
+    
+    position_pct = price_position / curve_range
+    
+    if position_pct > 0.66:
+        return "HIGH"
+    elif position_pct < 0.33:
+        return "LOW"
+    else:
+        return "EQUILIBRIUM"

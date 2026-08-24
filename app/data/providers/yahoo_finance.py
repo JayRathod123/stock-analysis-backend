@@ -8,6 +8,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import pandas as pd
+import time
+
+_CANDLE_CACHE = {} # memory cache
+CACHE_TTL = 300 # 5 mins
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,8 @@ _TIMEFRAME_MAP: Dict[str, Dict[str, Any]] = {
     "1m":     {"interval": "1m",  "period": "5d",   "resample": None},
     "5m":     {"interval": "5m",  "period": "60d",  "resample": None},
     "15m":    {"interval": "15m", "period": "60d",  "resample": None},
+    "75m":    {"interval": "15m", "period": "60d",  "resample": "75min"},
+    "125m":   {"interval": "5m",  "period": "60d",  "resample": "125min"},
     "30m":    {"interval": "30m", "period": "60d",  "resample": None},
     "1H":     {"interval": "60m", "period": "180d", "resample": None},
     "1h":     {"interval": "60m", "period": "180d", "resample": None},
@@ -37,6 +43,7 @@ _TIMEFRAME_MAP: Dict[str, Dict[str, Any]] = {
     "Weekly": {"interval": "1wk", "period": "5y",   "resample": None},
     "weekly": {"interval": "1wk", "period": "5y",   "resample": None},
     "1W":     {"interval": "1wk", "period": "5y",   "resample": None},
+    "1mo":    {"interval": "1mo", "period": "10y",  "resample": None},
 }
 
 
@@ -67,6 +74,14 @@ def fetch_candles(
     resample_rule = tf_config.get("resample")
 
     yf_symbol = _to_yf_symbol(symbol, exchange)
+    
+    # Check cache
+    cache_key = f"{yf_symbol}_{interval}_{period}_{resample_rule}"
+    if cache_key in _CANDLE_CACHE:
+        cached_data, timestamp = _CANDLE_CACHE[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return cached_data
+            
     logger.info(f"Fetching {yf_symbol} | interval={interval} | period={period}")
 
     ticker = yf.Ticker(yf_symbol)
@@ -110,6 +125,7 @@ def fetch_candles(
             "volume": round(float(row["Volume"]), 2),
         })
 
+    _CANDLE_CACHE[cache_key] = (candles, time.time())
     return candles
 
 
@@ -148,3 +164,4 @@ def fetch_quote(symbol: str, exchange: str = "NSE") -> Dict[str, Any]:
         "volume":        volume,
         "last_update":   datetime.utcnow().isoformat() + "Z",
     }
+

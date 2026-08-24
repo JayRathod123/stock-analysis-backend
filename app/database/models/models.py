@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 from typing import Optional, List
 from sqlmodel import SQLModel, Field, Relationship
 
@@ -152,3 +152,17 @@ class AnalysisRun(SQLModel, table=True):
     current_price: float = Field(nullable=False)
     market_bias: str = Field(nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+class DailyScan(SQLModel, table=True):
+    __tablename__ = "daily_scans"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_date: datetime = Field(default_factory=datetime.utcnow, index=True)
+    symbol: str = Field(index=True)
+    name: str = Field(default="")
+    setup_type: str = Field(default="") # INTRADAY or SWING
+    entry_price: float = Field(default=0.0)
+    stop_loss: float = Field(default=0.0)
+    target_price: float = Field(default=0.0)
+    score: str = Field(default="")
+    ai_summary: Optional[str] = Field(default=None)

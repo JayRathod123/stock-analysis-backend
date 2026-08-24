@@ -1,7 +1,7 @@
 ﻿from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import health, stocks, candles, analysis, zones, backtests, ai
+from app.api.routes import health, stocks, candles, analysis, zones, backtests, ai, screener, market
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.database.connection import init_db
@@ -37,3 +37,11 @@ app.include_router(analysis.router, prefix=f"{settings.API_V1_STR}/analysis", ta
 app.include_router(zones.router, prefix=f"{settings.API_V1_STR}/zones", tags=["Zones"])
 app.include_router(backtests.router, prefix=f"{settings.API_V1_STR}/backtests", tags=["Backtests"])
 app.include_router(ai.router, prefix=f"{settings.API_V1_STR}/ai", tags=["AI"])
+app.include_router(screener.router, prefix=f"{settings.API_V1_STR}/screener", tags=["Screener"])
+app.include_router(market.router, prefix=f"{settings.API_V1_STR}/market", tags=["Market"])
+app.include_router(screener.router, prefix=f"{settings.API_V1_STR}/screener", tags=["Screener"])
+app.include_router(market.router, prefix=f"{settings.API_V1_STR}/market", tags=["Market"])
+
+
+
+
