@@ -1,4 +1,4 @@
-﻿"""
+"""
 Yahoo Finance data provider for Indian stocks (NSE/BSE).
 Supports real OHLCV candle history and live price quotes.
 NSE symbol format: RELIANCE.NS
@@ -9,8 +9,10 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import pandas as pd
 import time
+import yfinance as yf
 
 _CANDLE_CACHE = {} # memory cache
+_RAW_CACHE = {} # cache raw dataframes
 CACHE_TTL = 300 # 5 mins
 
 logger = logging.getLogger(__name__)
@@ -66,8 +68,6 @@ def fetch_candles(
     Fetch real OHLCV candles from Yahoo Finance for an Indian stock.
     Returns a list of dicts: {time, open, high, low, close, volume}
     """
-    import yfinance as yf  # import here so module loads even without yfinance installed
-
     tf_config = _TIMEFRAME_MAP.get(timeframe, _TIMEFRAME_MAP["Daily"])
     interval = tf_config["interval"]
     period = tf_config["period"]
@@ -82,21 +82,39 @@ def fetch_candles(
         if time.time() - timestamp < CACHE_TTL:
             return cached_data
             
-    logger.info(f"Fetching {yf_symbol} | interval={interval} | period={period}")
+    raw_cache_key = f"{yf_symbol}_{interval}_{period}"
+    df = None
+    if raw_cache_key in _RAW_CACHE:
+        cached_df, timestamp = _RAW_CACHE[raw_cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            df = cached_df.copy()
+            
+    if df is None:
+        logger.info(f"Fetching {yf_symbol} | interval={interval} | period={period}")
 
-    ticker = yf.Ticker(yf_symbol)
-    df = ticker.history(
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        prepost=False,
-    )
+        try:
+            ticker = yf.Ticker(yf_symbol)
+            fetched_df = ticker.history(
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                prepost=False,
+            )
+        except Exception as e:
+            logger.error(f"Error fetching {yf_symbol}: {e}")
+            fetched_df = pd.DataFrame()
 
-    if df is None or df.empty:
-        raise ValueError(f"No data returned for {yf_symbol} ({interval}/{period})")
+        if fetched_df is None or fetched_df.empty:
+            # Cache empty dataframe to prevent immediate retries
+            _RAW_CACHE[raw_cache_key] = (pd.DataFrame(), time.time())
+            raise ValueError(f"No data returned for {yf_symbol} ({interval}/{period})")
 
-    # Drop rows with NaN OHLCV
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+        # Drop rows with NaN OHLCV
+        df = fetched_df.dropna(subset=["Open", "High", "Low", "Close"])
+        _RAW_CACHE[raw_cache_key] = (df.copy(), time.time())
+
+    if df.empty:
+        raise ValueError(f"Cached data is empty for {yf_symbol} ({interval}/{period})")
 
     # Resample for 4H etc.
     if resample_rule:
@@ -164,4 +182,28 @@ def fetch_quote(symbol: str, exchange: str = "NSE") -> Dict[str, Any]:
         "volume":        volume,
         "last_update":   datetime.utcnow().isoformat() + "Z",
     }
+
+def preload_candles(symbols: List[str], timeframes: List[str], exchange: str = "NSE"):
+    """
+    Massively speeds up scanning by pre-populating the cache for multiple symbols and timeframes
+    concurrently before the main CPU-bound analysis begins.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    
+    # We will just spawn a thread pool to aggressively hit our own fetch_candles function.
+    # Since fetch_candles implements caching, it will cache the data for subsequent usage.
+    
+    def _fetch(args):
+        sym, tf = args
+        try:
+            fetch_candles(sym, tf, exchange)
+        except Exception:
+            pass
+            
+    tasks = [(s, t) for s in symbols for t in timeframes]
+    
+    logger.info(f"Preloading {len(symbols)} symbols across {len(timeframes)} timeframes ({len(tasks)} tasks)")
+    
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        executor.map(_fetch, tasks)
 

@@ -1,4 +1,4 @@
-﻿import pandas as pd
+import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Tuple
 
@@ -58,7 +58,8 @@ def score_zone(
     retest_count: int,
     itf_trend: str = "NEUTRAL",
     htf_curve: str = "EQUILIBRIUM",
-    ema_context: str = "N/A"
+    ema_context: str = "N/A",
+    ema_intersection: bool = False
 ) -> Dict[str, Any]:
     positive_reasons = []
     negative_reasons = []
@@ -98,7 +99,7 @@ def score_zone(
             from app.analysis.zones import is_base_candle
             # If not a base candle, it's exciting
             atr_val = (c2["high"] - c2["low"]) # rough approx
-            if not is_base_candle(c2, atr_val):
+            if not is_base_candle(c2["high"], c2["low"], c2["open"], c2["close"], atr_val):
                 second_exciting = True
 
         if second_exciting:
@@ -122,6 +123,11 @@ def score_zone(
     else:
         negative_reasons.append(f">5 Base Candles ({base_count}) (0)")
 
+    # 4. EMA Intersection (+1)
+    if ema_intersection:
+        points += 1
+        positive_reasons.append("EMA trading through zone (+1)")
+
     # MTF Curve & Trend (Hard Filters)
     if is_demand:
         if htf_curve == "HIGH":
@@ -133,6 +139,9 @@ def score_zone(
             rejection_reasons.append("REJECTED: Low on HTF Curve (Do not sell).")
         if itf_trend == "UPTREND":
             rejection_reasons.append("REJECTED: Trading against Uptrend (Do not sell).")
+
+    # Cap maximum score at 7 so we don't get 8/7 or >100% scores
+    points = min(points, 7.0)
 
     return {
         "final_score": points,

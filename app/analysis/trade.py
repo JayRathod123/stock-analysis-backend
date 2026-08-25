@@ -1,4 +1,4 @@
-﻿from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple
 
 def generate_trade_setup(
     zone: Dict[str, Any], 
@@ -11,22 +11,23 @@ def generate_trade_setup(
     p_min = zone["price_min"]
     p_max = zone["price_max"]
         
+    buffer = atr_val * 0.1
     if is_demand:
-        entry = p_max # Proximal line
-        sl = p_min # Distal line
+        entry = p_max + buffer # Just above proximal line
+        sl = p_min - buffer # Just below distal line
         risk = entry - sl
             
-        # Target 1 (1:3 R:R), Target 2 (1:5 R:R)
-        t1 = entry + 3.0 * risk
-        t2 = entry + 5.0 * risk
+        # Target 1 (1:2 R:R), Target 2 (1:3 R:R)
+        t1 = entry + 2.0 * risk
+        t2 = entry + 3.0 * risk
         reward = t1 - entry
     else:
-        entry = p_min # Proximal line
-        sl = p_max # Distal line
+        entry = p_min - buffer # Just below proximal line
+        sl = p_max + buffer # Just above distal line
         risk = sl - entry
             
-        t1 = entry - 3.0 * risk
-        t2 = entry - 5.0 * risk
+        t1 = entry - 2.0 * risk
+        t2 = entry - 3.0 * risk
         reward = entry - t1
         
     rr = reward / risk if risk > 0 else 0

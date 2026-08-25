@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -10,6 +10,8 @@ from app.analysis.zones import detect_zones, deduplicate_zones
 
 from app.analysis.scoring import evaluate_freshness_and_retests, score_zone
 from app.analysis.trade import generate_trade_setup
+from app.analysis.indicators.calculations import calculate_atr
+from app.data.providers.yahoo_finance import fetch_candles
 
 router = APIRouter()
 
@@ -22,7 +24,6 @@ ANALYSIS_CACHE = {}
 
 def _get_candles(symbol: str, timeframe: str) -> List[dict]:
     try:
-        from app.data.providers.yahoo_finance import fetch_candles
         candles = fetch_candles(symbol, timeframe)
         if candles:
             return candles
@@ -48,17 +49,56 @@ def _process_timeframe(
     detected_sd = detect_zones(df)
     
     # GTF only uses core S&D zones
+    from app.analysis.zones import flag_reaction_zones
+    from app.analysis.structure import detect_market_traps
     detected = deduplicate_zones(detected_sd, 0.015)
+    detected = flag_reaction_zones(detected)
+    detected = detect_market_traps(df, detected)
     valid_zones = []
     
     current_price = float(df["close"].iloc[-1])
+
+    from app.analysis.indicators.calculations import calculate_ema
+    if "close" in df.columns and len(df) > 50:
+        ema_20 = calculate_ema(df["close"], 20).iloc[-1]
+        ema_50 = calculate_ema(df["close"], 50).iloc[-1]
+    else:
+        ema_20 = ema_50 = 0.0
 
     for idx, z in enumerate(detected):
         status, retests, history = evaluate_freshness_and_retests(z, df)
         ema_context = "Above 50 EMA" if _is_bullish_context(df) else "Below 50 EMA"
         
+        # Gap Context
+        z["gap_context"] = "NONE"
+        base_start = z.get("base_end_idx", 1) - z.get("base_candles", 1)
+        base_end = z.get("base_end_idx", 1)
+        
+        # Check pro gap (departure gap)
+        if base_end + 1 < len(df):
+            dep_candle = df.iloc[base_end + 1]
+            prev_candle = df.iloc[base_end]
+            if z["type"] == "DEMAND" and dep_candle["open"] > prev_candle["high"]:
+                z["gap_context"] = "PRO_GAP_UP"
+            elif z["type"] == "SUPPLY" and dep_candle["open"] < prev_candle["low"]:
+                z["gap_context"] = "PRO_GAP_DOWN"
+        
+        # Check novice gap (entry gap into zone)
+        if base_start > 0 and z["gap_context"] == "NONE":
+            legin_candle = df.iloc[base_start - 1]
+            first_base = df.iloc[base_start]
+            if z["type"] == "DEMAND" and first_base["open"] < legin_candle["low"]:
+                z["gap_context"] = "NOVICE_GAP_DOWN"
+            elif z["type"] == "SUPPLY" and first_base["open"] > legin_candle["high"]:
+                z["gap_context"] = "NOVICE_GAP_UP"
+        
+        # Check if EMA 20 or 50 is trading through the zone
+        ema_intersection = False
+        if (z["price_min"] <= ema_20 <= z["price_max"]) or (z["price_min"] <= ema_50 <= z["price_max"]):
+            ema_intersection = True
+        
         # New MTF Scoring
-        scores = score_zone(z, df, status, retests, itf_trend=itf_trend, htf_curve=htf_curve, ema_context=ema_context)
+        scores = score_zone(z, df, status, retests, itf_trend=itf_trend, htf_curve=htf_curve, ema_context=ema_context, ema_intersection=ema_intersection)
         trade = generate_trade_setup(z, atr_val)
 
         entry_price = trade["entry"]
@@ -83,6 +123,10 @@ def _process_timeframe(
             "trend": struct["bias"],
             "ema_context": ema_context,
             "vwap_context": "Above VWAP" if _is_above_vwap(df) else "Below VWAP",
+            "gap_context": z["gap_context"],
+            "trap_type": z.get("trap_type", "NONE"),
+            "is_reaction": z.get("is_reaction", False),
+            "is_lotl": z.get("is_lotl", False),
             "entry": trade["entry"],
             "stop_loss": trade["stop_loss"],
             "target_1": trade["target_1"],
@@ -98,8 +142,12 @@ def _process_timeframe(
             "proximity_pct": round(proximity_pct, 2)
         }
 
-        # Threshold relaxed from 14 to 9 to show "good" zones as requested
-        if scores["final_score"] >= 6 and not scores["is_rejected"] and trade["status"] != "REJECTED_RR":
+        if z.get("is_reaction", False):
+            scores["is_rejected"] = True
+            scores["rejection_reasons"].append("REJECTED: Zone is a reaction of a previous zone.")
+
+        # Threshold relaxed to 5 to show "good" zones as requested
+        if scores["final_score"] >= 5 and not scores["is_rejected"] and trade["status"] != "REJECTED_RR":
             valid_zones.append(zone_detail)
             
     # Calculate proximity to current price
@@ -174,9 +222,6 @@ def run_analysis_endpoint(params: RunAnalysisParams):
     swing_zones = []
     scalping_zones = []
     
-    from app.analysis.indicators.calculations import calculate_atr
-    from app.analysis.structure import analyze_market_structure, evaluate_curve
-    
     if mode == "intraday" or mode not in ["intraday", "swing", "scalping"]:
         struct_75m = analyze_market_structure(df_75m)
         struct_15m = analyze_market_structure(df_15m)
@@ -225,7 +270,7 @@ def run_analysis_endpoint(params: RunAnalysisParams):
             df=df_5m, 
             struct=struct_5m, 
             atr_val=atr_val_5m,
-            htf_curve=curve_75m,
+            htf_curve=curve_1d,
             itf_trend=struct_15m["bias"]
         )
         
@@ -237,7 +282,9 @@ def run_analysis_endpoint(params: RunAnalysisParams):
 
     # Trade Decision
     trade_decision = "WAIT"
-    if (best_intraday and best_intraday["final_score"] >= 6) or        (best_swing and best_swing["final_score"] >= 6) or        (best_scalping and best_scalping["final_score"] >= 6):
+    if (best_intraday and best_intraday["final_score"] >= 5) or \
+       (best_swing and best_swing["final_score"] >= 5) or \
+       (best_scalping and best_scalping["final_score"] >= 5):
         trade_decision = "TRADE"
 
     return {

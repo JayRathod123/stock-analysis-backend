@@ -1,15 +1,16 @@
-﻿import pandas as pd
+import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Tuple
+from app.analysis.indicators.calculations import calculate_atr
 
-def is_base_candle(row: pd.Series, atr_value: float) -> bool:
+def is_base_candle(row_high, row_low, row_open, row_close, atr_value: float) -> bool:
     """
     Identifies if a candle is a base candle.
     A base candle is defined by its body range being small relative to the high-low range,
     and its overall range being narrow.
     """
-    hl_range = row["high"] - row["low"]
-    body_range = abs(row["close"] - row["open"])
+    hl_range = row_high - row_low
+    body_range = abs(row_close - row_open)
     
     if hl_range == 0:
         return True
@@ -23,16 +24,14 @@ def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, 
     if len(df) < 10:
         return zones
         
-    closes = df["close"]
-    opens = df["open"]
-    highs = df["high"]
-    lows = df["low"]
-    
-    from app.analysis.indicators.calculations import calculate_atr
-    atr = calculate_atr(highs, lows, closes, 14)
+    closes = df["close"].values
+    opens = df["open"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    atr = calculate_atr(df["high"], df["low"], df["close"], 14)
     
     for i in range(1, len(df) - 2):
-        atr_val = atr.iloc[i] if not pd.isna(atr.iloc[i]) else (highs.iloc[i] - lows.iloc[i])
+        atr_val = atr.iloc[i] if not pd.isna(atr.iloc[i]) else (highs[i] - lows[i])
         if atr_val == 0:
             atr_val = 1.0
             
@@ -40,11 +39,11 @@ def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, 
             if i + base_len >= len(df) - 1:
                 break
                 
-            base_rows = [df.iloc[i + k] for k in range(base_len)]
+            base_rows = [(highs[i+k], lows[i+k], opens[i+k], closes[i+k]) for k in range(base_len)]
             
             all_bases = True
             for br in base_rows:
-                if not is_base_candle(br, atr_val):
+                if not is_base_candle(br[0], br[1], br[2], br[3], atr_val):
                     all_bases = False
                     break
                     
@@ -54,17 +53,17 @@ def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, 
             legin_idx = i - 1
             legout_idx = i + base_len
             
-            legin = df.iloc[legin_idx]
-            legout = df.iloc[legout_idx]
+            legin = (highs[legin_idx], lows[legin_idx], opens[legin_idx], closes[legin_idx])
+            legout = (highs[legout_idx], lows[legout_idx], opens[legout_idx], closes[legout_idx])
             
-            if is_base_candle(legin, atr_val) or is_base_candle(legout, atr_val):
+            if is_base_candle(legin[0], legin[1], legin[2], legin[3], atr_val) or is_base_candle(legout[0], legout[1], legout[2], legout[3], atr_val):
                 continue
                 
-            legin_range = legin["high"] - legin["low"]
-            legout_range = legout["high"] - legout["low"]
+            legin_range = legin[0] - legin[1]
+            legout_range = legout[0] - legout[1]
             
-            legin_dir = "GREEN" if legin["close"] > legin["open"] else "RED"
-            legout_dir = "GREEN" if legout["close"] > legout["open"] else "RED"
+            legin_dir = "GREEN" if legin[3] > legin[2] else "RED"
+            legout_dir = "GREEN" if legout[3] > legout[2] else "RED"
             
             # GTF Closing Concepts (Page 24)
             # Demand: Legout MUST close above legin. Supply: Legout MUST close below legin.
@@ -72,18 +71,18 @@ def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, 
             is_demand = legout_dir == "GREEN"
             is_supply = legout_dir == "RED"
             
-            if is_demand and legout["close"] <= legin["close"]:
+            if is_demand and legout[3] <= legin[3]:
                 continue # Fails closing concept
-            if is_supply and legout["close"] >= legin["close"]:
+            if is_supply and legout[3] >= legin[3]:
                 continue # Fails closing concept
                 
             # Zone Marking (Page 11-12)
             # Demand Proximal: Highest body of all base. Distal: Lowest wick of all base.
             # Supply Proximal: Lowest body of all base. Distal: Highest wick of all base.
-            base_high_bodies = [max(r["open"], r["close"]) for r in base_rows]
-            base_low_bodies = [min(r["open"], r["close"]) for r in base_rows]
-            base_high_wicks = [r["high"] for r in base_rows]
-            base_low_wicks = [r["low"] for r in base_rows]
+            base_high_bodies = [max(r[2], r[3]) for r in base_rows]
+            base_low_bodies = [min(r[2], r[3]) for r in base_rows]
+            base_high_wicks = [r[0] for r in base_rows]
+            base_low_wicks = [r[1] for r in base_rows]
             
             if is_demand:
                 price_max = max(base_high_bodies) # Proximal
@@ -102,6 +101,7 @@ def detect_zones(df: pd.DataFrame, max_base_candles: int = 6) -> List[Dict[str, 
                 "base_candles": base_len,
                 "departure_strength": "STRONG",
                 "base_end_idx": legout_idx - 1,
+                "is_lotl": False,
             })
             
     return zones
@@ -121,15 +121,19 @@ def deduplicate_zones(zones: List[Dict[str, Any]], threshold_pct: float = 0.02) 
             price_ref = current["price_max"] if current["type"] == "DEMAND" else current["price_min"]
             price_next = next_zone["price_max"] if next_zone["type"] == "DEMAND" else next_zone["price_min"]
             diff_pct = abs(price_ref - price_next) / price_ref if price_ref > 0 else 0
-            if diff_pct <= threshold_pct:
-                if current["type"] == "DEMAND":
-                    current["price_min"] = min(current["price_min"], next_zone["price_min"])
-                    current["price_max"] = max(current["price_max"], next_zone["price_max"])
-                else:
-                    current["price_min"] = min(current["price_min"], next_zone["price_min"])
-                    current["price_max"] = max(current["price_max"], next_zone["price_max"])
+            
+            # Calculate what the new width would be if merged
+            new_min = min(current["price_min"], next_zone["price_min"])
+            new_max = max(current["price_max"], next_zone["price_max"])
+            new_width_pct = (new_max - new_min) / new_min if new_min > 0 else 0
+            
+            # Merge if within threshold AND the resulting zone isn't absurdly massive (> 4% wide)
+            if diff_pct <= threshold_pct and new_width_pct <= 0.04:
+                current["price_min"] = new_min
+                current["price_max"] = new_max
                 if next_zone['pattern'] not in current['pattern']:
                     current["pattern"] = f"{current['pattern']} / {next_zone['pattern']}"
+                current["is_lotl"] = True
             else:
                 merged.append(current)
                 current = next_zone
@@ -137,3 +141,15 @@ def deduplicate_zones(zones: List[Dict[str, Any]], threshold_pct: float = 0.02) 
         return merged
 
     return merge_group(demands) + merge_group(supplies)
+
+def flag_reaction_zones(zones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    sorted_zones = sorted(zones, key=lambda z: z["base_end_idx"])
+    for i in range(len(sorted_zones)):
+        sorted_zones[i]["is_reaction"] = False
+        z1 = sorted_zones[i]
+        for j in range(i):
+            z2 = sorted_zones[j]
+            if z1["price_min"] >= z2["price_min"] and z1["price_max"] <= z2["price_max"]:
+                sorted_zones[i]["is_reaction"] = True
+                break
+    return sorted_zones

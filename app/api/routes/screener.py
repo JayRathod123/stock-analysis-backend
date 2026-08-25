@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter
+from fastapi import APIRouter
 from typing import List, Dict, Any
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +10,7 @@ router = APIRouter()
 # Top 50 highly liquid Nifty stocks
 NIFTY_50 = [
     "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", 
-    "ITC", "SBIN", "BHARTIARTL", "BAJFINANCE", "LART", 
+    "ITC", "SBIN", "BHARTIARTL", "BAJFINANCE", "LT", 
     "HINDUNILVR", "AXISBANK", "KOTAKBANK", "MARUTI", "SUNPHARMA", 
     "TATAMOTORS", "ASIANPAINT", "NTPC", "TITAN", "ULTRACEMCO",
     "TATASTEEL", "POWERGRID", "M&M", "WIPRO", "HCLTECH",
@@ -47,7 +47,10 @@ def process_stock(symbol: str, mode: str) -> Dict[str, Any]:
             current_price = analysis["current_price"]
             if entry_price > 0:
                 proximity = abs(entry_price - current_price) / current_price * 100
-                if z.get("final_score", 0) >= 6 and proximity <= 1.5:
+                if mode == "swing": max_prox = 4.0
+                elif mode == "scalping": max_prox = 1.0
+                else: max_prox = 1.5
+                if z.get("final_score", 0) >= 5 and proximity <= max_prox:
                     z["proximity_pct"] = proximity
                     valid_setups.append(z)
                     
@@ -69,8 +72,21 @@ async def screen_todays_trades(mode: str = "intraday"):
     '''
     loop = asyncio.get_event_loop()
     
-    # Process up to 10 stocks concurrently to avoid massive rate limits from YFinance
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # Preload all data into the memory cache simultaneously using a thread pool
+    from app.data.providers.yahoo_finance import preload_candles
+    
+    # We always fetch LTF, ITF, HTF depending on the mode. Let's just preload the required ones.
+    if mode == "intraday":
+        await loop.run_in_executor(None, preload_candles, NIFTY_50, ["15m", "75m", "1d"])
+    elif mode == "swing":
+        await loop.run_in_executor(None, preload_candles, NIFTY_50, ["125m", "1d", "1W"])
+    elif mode == "scalping":
+        await loop.run_in_executor(None, preload_candles, NIFTY_50, ["5m", "15m", "75m"])
+    else:
+        await loop.run_in_executor(None, preload_candles, NIFTY_50, ["5m", "15m", "75m", "125m", "1d", "1W", "1mo"])
+
+    # Process up to 25 stocks concurrently now that data is cached
+    with ThreadPoolExecutor(max_workers=25) as executor:
         tasks = [
             loop.run_in_executor(executor, process_stock, symbol, mode)
             for symbol in NIFTY_50

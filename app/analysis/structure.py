@@ -1,6 +1,7 @@
-﻿import pandas as pd
+import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Tuple
+from app.analysis.zones import detect_zones
 
 def detect_swings(high: pd.Series, low: pd.Series, window: int = 2) -> Tuple[pd.Series, pd.Series]:
     """
@@ -10,92 +11,81 @@ def detect_swings(high: pd.Series, low: pd.Series, window: int = 2) -> Tuple[pd.
     swing_highs = pd.Series(index=high.index, dtype=float)
     swing_lows = pd.Series(index=low.index, dtype=float)
     
+    high_vals = high.values
+    low_vals = low.values
+    
     for i in range(window, len(high) - window):
         # Swing High
         is_high = True
         for w in range(1, window + 1):
-            if high.iloc[i] <= high.iloc[i - w] or high.iloc[i] <= high.iloc[i + w]:
+            if high_vals[i] <= high_vals[i - w] or high_vals[i] <= high_vals[i + w]:
                 is_high = False
                 break
         if is_high:
-            swing_highs.iloc[i] = high.iloc[i]
+            swing_highs.iloc[i] = high_vals[i]
             
         # Swing Low
         is_low = True
         for w in range(1, window + 1):
-            if low.iloc[i] >= low.iloc[i - w] or low.iloc[i] >= low.iloc[i + w]:
+            if low_vals[i] >= low_vals[i - w] or low_vals[i] >= low_vals[i + w]:
                 is_low = False
                 break
         if is_low:
-            swing_lows.iloc[i] = low.iloc[i]
+            swing_lows.iloc[i] = low_vals[i]
             
     return swing_highs, swing_lows
 
 def analyze_market_structure(df: pd.DataFrame, window: int = 2) -> Dict[str, Any]:
     """
-    Calculates swing points, BOS, CHoCH, and trend bias.
+    Calculates trend bias using GTF Advanced Trend Analysis (Zone breaches).
     """
     if len(df) < 10:
         return {
             "bias": "NEUTRAL",
-            "structure": "CONSOLIDATION",
-            "swings_high": [],
-            "swings_low": [],
-            "bos_count": 0,
-            "choch_detected": False
+            "structure": "CONSOLIDATION"
         }
         
-    highs = df["high"]
-    lows = df["low"]
-    closes = df["close"]
+    zones = detect_zones(df)
+    zones = sorted(zones, key=lambda z: z["base_end_idx"])
     
-    swing_highs, swing_lows = detect_swings(highs, lows, window)
+    supply_breaches = 0
+    demand_breaches = 0
     
-    sh_indices = swing_highs.dropna().index.tolist()
-    sl_indices = swing_lows.dropna().index.tolist()
+    close_vals = df["close"].values
     
-    bias = "NEUTRAL"
-    structure = "CONSOLIDATION"
-    bos_count = 0
-    choch_detected = False
-    
-    if len(sh_indices) >= 2 and len(sl_indices) >= 2:
-        last_sh = swing_highs.loc[sh_indices[-1]]
-        prev_sh = swing_highs.loc[sh_indices[-2]]
-        
-        last_sl = swing_lows.loc[sl_indices[-1]]
-        prev_sl = swing_lows.loc[sl_indices[-2]]
-        
-        if last_sh > prev_sh and last_sl > prev_sl:
-            bias = "BULLISH"
-            structure = "UPTREND"
-        elif last_sh < prev_sh and last_sl < prev_sl:
-            bias = "BEARISH"
-            structure = "DOWNTREND"
-            
-        last_close = closes.iloc[-1]
-        if last_close > last_sh:
-            bos_count += 1
-            if bias == "BEARISH":
-                choch_detected = True
-                bias = "BULLISH"
-        elif last_close < last_sl:
-            bos_count += 1
-            if bias == "BULLISH":
-                choch_detected = True
-                bias = "BEARISH"
+    for z in zones:
+        end_idx = z["base_end_idx"]
+        breached = False
+        for i in range(end_idx + 1, len(df)):
+            if z["type"] == "DEMAND" and close_vals[i] < z["price_min"]:
+                breached = True
+                break
+            elif z["type"] == "SUPPLY" and close_vals[i] > z["price_max"]:
+                breached = True
+                break
                 
+        if breached:
+            if z["type"] == "DEMAND":
+                demand_breaches += 1
+                supply_breaches = 0 # reset opposite
+            else:
+                supply_breaches += 1
+                demand_breaches = 0
+                
+    bias = "NEUTRAL"
+    if supply_breaches >= 2:
+        bias = "UPTREND"
+    elif demand_breaches >= 2:
+        bias = "DOWNTREND"
+    elif supply_breaches == 1 or demand_breaches == 1:
+        bias = "SIDEWAYS"
+        
     return {
         "bias": bias,
-        "structure": structure,
-        "swings_high": sh_indices,
-        "swings_low": sl_indices,
-        "bos_count": bos_count,
-        "choch_detected": choch_detected
+        "structure": bias
     }
 
 def evaluate_curve(df_htf: pd.DataFrame, current_price: float) -> str:
-    from app.analysis.zones import detect_zones
     zones = detect_zones(df_htf)
     
     htf_supplies = [z for z in zones if z["type"] == "SUPPLY" and z["price_min"] > current_price]
@@ -118,3 +108,30 @@ def evaluate_curve(df_htf: pd.DataFrame, current_price: float) -> str:
         return "LOW"
     else:
         return "EQUILIBRIUM"
+
+def detect_market_traps(df: pd.DataFrame, zones: List[Dict[str, Any]], window: int = 5) -> List[Dict[str, Any]]:
+    """
+    Identifies Bull Traps (resistance just below supply) and Bear Traps (support just above demand).
+    """
+    highs = df["high"]
+    lows = df["low"]
+    swing_highs, swing_lows = detect_swings(highs, lows, window)
+    
+    sh_vals = swing_highs.dropna().values
+    sl_vals = swing_lows.dropna().values
+    
+    for z in zones:
+        z["trap_type"] = "NONE"
+        if z["type"] == "SUPPLY":
+            # Check if there is a swing high just below the supply zone (within 1%)
+            for sh in sh_vals:
+                if sh < z["price_min"] and (z["price_min"] - sh) / z["price_min"] < 0.01:
+                    z["trap_type"] = "BULL_TRAP"
+                    break
+        else:
+            # Check if there is a swing low just above the demand zone (within 1%)
+            for sl in sl_vals:
+                if sl > z["price_max"] and (sl - z["price_max"]) / z["price_max"] < 0.01:
+                    z["trap_type"] = "BEAR_TRAP"
+                    break
+    return zones
