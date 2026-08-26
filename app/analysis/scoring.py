@@ -59,7 +59,8 @@ def score_zone(
     itf_trend: str = "NEUTRAL",
     htf_curve: str = "EQUILIBRIUM",
     ema_context: str = "N/A",
-    ema_intersection: bool = False
+    ema_intersection: bool = False,
+    timeframe: str = "15m"
 ) -> Dict[str, Any]:
     positive_reasons = []
     negative_reasons = []
@@ -77,6 +78,9 @@ def score_zone(
         positive_reasons.append("Tested Once (+1.5)")
     else:
         negative_reasons.append("Tested Twice or Consumed (0)")
+
+    if status == "INVALIDATED":
+        rejection_reasons.append("REJECTED: Zone is Invalidated (Price broke distal line).")
         
     # 2. Strength / Departure (Max 2)
     # Check departure candles for gaps
@@ -112,7 +116,7 @@ def score_zone(
             points += 1
             positive_reasons.append("1 Exciting Candle no GAP (+1)")
             
-    # 3. Time at Base (Max 2)
+    # 3. Time at Base (Max 2) (Page 35)
     base_count = zone["base_candles"]
     if 1 <= base_count <= 3:
         points += 2
@@ -123,32 +127,46 @@ def score_zone(
     else:
         negative_reasons.append(f">5 Base Candles ({base_count}) (0)")
 
-    # 4. EMA Intersection (+1)
+    # 4. EMA Intersection (+1) (Page 41, Point 3)
     if ema_intersection:
         points += 1
-        positive_reasons.append("EMA trading through zone (+1)")
+        positive_reasons.append("20/50 EMA trading through zone (+1)")
 
-    # MTF Curve & Trend (Hard Filters)
+    # MTF Curve & Trend Rules (Pages 32-33)
     if is_demand:
         if htf_curve == "HIGH":
-            rejection_reasons.append("REJECTED: High on HTF Curve (Do not buy).")
+            rejection_reasons.append("REJECTED: High on HTF Curve (Sell only on high curve).")
         if itf_trend == "DOWNTREND":
             rejection_reasons.append("REJECTED: Trading against Downtrend (Do not buy).")
     else:
         if htf_curve == "LOW":
-            rejection_reasons.append("REJECTED: Low on HTF Curve (Do not sell).")
+            rejection_reasons.append("REJECTED: Low on HTF Curve (Buy only on low curve).")
         if itf_trend == "UPTREND":
             rejection_reasons.append("REJECTED: Trading against Uptrend (Do not sell).")
 
-    # Cap maximum score at 7 so we don't get 8/7 or >100% scores
-    points = min(points, 7.0)
+    # Score below 5 Rule (Page 35: "No trade should be below 5")
+    if points < 5.0:
+        rejection_reasons.append(f"REJECTED: Trade score ({points}/7) is below minimum 5 points.")
+
+    # Cap maximum score at 7 (Page 34-35)
+    final_score = min(points, 7.0)
+
+    # Entry Type (Pages 35-37)
+    if final_score >= 7.0:
+        entry_type = "TYPE 1: SET & FORGET (Score 7)"
+    elif final_score >= 5.0:
+        entry_type = "TYPE 2/3: CONFIRM ENTRY (Score 5-6)"
+    else:
+        entry_type = "NO TRADE (Score < 5)"
 
     return {
-        "final_score": points,
+        "final_score": final_score,
+        "raw_points": points,
+        "entry_type": entry_type,
         "positive_reasons": positive_reasons,
         "negative_reasons": negative_reasons,
         "rejection_reasons": rejection_reasons,
-        "participation_proxy_score": points * 14.28, # Convert 7 to 100 scale
-        "authentication_score": points * 14.28,
+        "participation_proxy_score": final_score * 14.28,
+        "authentication_score": final_score * 14.28,
         "is_rejected": len(rejection_reasons) > 0
     }

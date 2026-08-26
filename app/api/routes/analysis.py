@@ -51,7 +51,7 @@ def _process_timeframe(
     # GTF only uses core S&D zones
     from app.analysis.zones import flag_reaction_zones
     from app.analysis.structure import detect_market_traps
-    detected = deduplicate_zones(detected_sd, 0.015)
+    detected = deduplicate_zones(detected_sd)
     detected = flag_reaction_zones(detected)
     detected = detect_market_traps(df, detected)
     valid_zones = []
@@ -98,7 +98,7 @@ def _process_timeframe(
             ema_intersection = True
         
         # New MTF Scoring
-        scores = score_zone(z, df, status, retests, itf_trend=itf_trend, htf_curve=htf_curve, ema_context=ema_context, ema_intersection=ema_intersection)
+        scores = score_zone(z, df, status, retests, itf_trend=itf_trend, htf_curve=htf_curve, ema_context=ema_context, ema_intersection=ema_intersection, timeframe=timeframe)
         trade = generate_trade_setup(z, atr_val)
 
         entry_price = trade["entry"]
@@ -138,15 +138,26 @@ def _process_timeframe(
             "positive_reasons": scores["positive_reasons"],
             "negative_reasons": scores["negative_reasons"],
             "warnings": scores["rejection_reasons"],
-            "entry_type": "TYPE 1: SET & FORGET" if scores["final_score"] >= 7 else "TYPE 2: CONFIRM ENTRY",
+            "entry_type": scores["entry_type"],
             "proximity_pct": round(proximity_pct, 2)
         }
 
-        if z.get("is_reaction", False):
-            scores["is_rejected"] = True
-            scores["rejection_reasons"].append("REJECTED: Zone is a reaction of a previous zone.")
+        # Timeframe-based Actionable Proximity Limits (GTF Nearest Zone Principle)
+        # Scalping (5m): within 1.5% of CMP
+        # Intraday (15m): within 2.5% of CMP
+        # Swing (125m/Daily): within 6.0% of CMP
+        if timeframe == "5m":
+            max_prox = 1.5
+        elif timeframe in ["15m", "10m"]:
+            max_prox = 2.5
+        else:
+            max_prox = 6.0
 
-        # Threshold relaxed to 5 to show "good" zones as requested
+        if proximity_pct > max_prox:
+            scores["is_rejected"] = True
+            scores["rejection_reasons"].append(f"REJECTED: Entry too far from CMP ({proximity_pct:.1f}% > {max_prox}%).")
+
+        # Threshold of score >= 5, not rejected, and valid R:R
         if scores["final_score"] >= 5 and not scores["is_rejected"] and trade["status"] != "REJECTED_RR":
             valid_zones.append(zone_detail)
             
